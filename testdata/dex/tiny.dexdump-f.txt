@@ -1,0 +1,65 @@
+Processing '/opt/github/dex-mcp/testdata/dex/tiny.dex'...
+Opened '/opt/github/dex-mcp/testdata/dex/tiny.dex', DEX version '035'
+DEX file header:
+magic               : 'dex\n035\0'
+checksum            : 9031ab01
+signature           : d7ec...3c8b
+file_size           : 1072
+header_size         : 112
+link_size           : 0
+link_off            : 0 (0x000000)
+string_ids_size     : 19
+string_ids_off      : 112 (0x000070)
+type_ids_size       : 8
+type_ids_off        : 188 (0x0000bc)
+proto_ids_size      : 3
+proto_ids_off       : 220 (0x0000dc)
+field_ids_size      : 1
+field_ids_off       : 256 (0x000100)
+method_ids_size     : 4
+method_ids_off      : 264 (0x000108)
+class_defs_size     : 1
+class_defs_off      : 296 (0x000128)
+data_size           : 744
+data_off            : 328 (0x000148)
+
+Class #0            -
+  Class descriptor  : 'Lfixtures/tiny/Hello;'
+  Access flags      : 0x0001 (PUBLIC)
+  Superclass        : 'Ljava/lang/Object;'
+  Interfaces        -
+  Static fields     -
+  Instance fields   -
+  Direct methods    -
+    #0              : (in Lfixtures/tiny/Hello;)
+      name          : '<init>'
+      type          : '()V'
+      access        : 0x10001 (PUBLIC CONSTRUCTOR)
+      code          -
+      registers     : 1
+      ins           : 1
+      outs          : 1
+      insns size    : 4 16-bit code units
+      catches       : (none)
+      positions     :
+        0x0000 line=3
+      locals        :
+        0x0000 - 0x0004 reg=0 this Lfixtures/tiny/Hello;
+    #1              : (in Lfixtures/tiny/Hello;)
+      name          : 'main'
+      type          : '([Ljava/lang/String;)V'
+      access        : 0x0009 (PUBLIC STATIC)
+      code          -
+      registers     : 3
+      ins           : 1
+      outs          : 2
+      insns size    : 8 16-bit code units
+      catches       : (none)
+      positions     :
+        0x0000 line=5
+        0x0007 line=6
+      locals        :
+        0x0000 - 0x0008 reg=2 args [Ljava/lang/String;
+  Virtual methods   -
+  source_file_idx   : 1 (Hello.java)
+

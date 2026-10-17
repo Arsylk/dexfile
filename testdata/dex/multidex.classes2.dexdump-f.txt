@@ -1,0 +1,154 @@
+Processing '/opt/github/dex-mcp/testdata/build/classes2.dex'...
+Opened '/opt/github/dex-mcp/testdata/build/classes2.dex', DEX version '035'
+DEX file header:
+magic               : 'dex\n035\0'
+checksum            : 9096cd74
+signature           : f673...2ad9
+file_size           : 1412
+header_size         : 112
+link_size           : 0
+link_off            : 0 (0x000000)
+string_ids_size     : 26
+string_ids_off      : 112 (0x000070)
+type_ids_size       : 8
+type_ids_off        : 216 (0x0000d8)
+proto_ids_size      : 5
+proto_ids_off       : 248 (0x0000f8)
+field_ids_size      : 2
+field_ids_off       : 308 (0x000134)
+method_ids_size     : 8
+method_ids_off      : 324 (0x000144)
+class_defs_size     : 2
+class_defs_off      : 388 (0x000184)
+data_size           : 960
+data_off            : 452 (0x0001c4)
+
+Class #0            -
+  Class descriptor  : 'Lfixtures/multidex/Callee;'
+  Access flags      : 0x0001 (PUBLIC)
+  Superclass        : 'Ljava/lang/Object;'
+  Interfaces        -
+  Static fields     -
+    #0              : (in Lfixtures/multidex/Callee;)
+      name          : 'NAME'
+      type          : 'Ljava/lang/String;'
+      access        : 0x0019 (PUBLIC STATIC FINAL)
+      value         : "callee"
+  Instance fields   -
+  Direct methods    -
+    #0              : (in Lfixtures/multidex/Callee;)
+      name          : '<init>'
+      type          : '()V'
+      access        : 0x10001 (PUBLIC CONSTRUCTOR)
+      code          -
+      registers     : 1
+      ins           : 1
+      outs          : 1
+      insns size    : 4 16-bit code units
+      catches       : (none)
+      positions     :
+        0x0000 line=4
+      locals        :
+        0x0000 - 0x0004 reg=0 this Lfixtures/multidex/Callee;
+    #1              : (in Lfixtures/multidex/Callee;)
+      name          : 'compute'
+      type          : '(I)I'
+      access        : 0x0009 (PUBLIC STATIC)
+      code          -
+      registers     : 2
+      ins           : 1
+      outs          : 0
+      insns size    : 3 16-bit code units
+      catches       : (none)
+      positions     :
+        0x0000 line=6
+      locals        :
+        0x0000 - 0x0003 reg=1 x I
+  Virtual methods   -
+    #0              : (in Lfixtures/multidex/Callee;)
+      name          : 'instanceCompute'
+      type          : '(I)I'
+      access        : 0x0001 (PUBLIC)
+      code          -
+      registers     : 3
+      ins           : 2
+      outs          : 0
+      insns size    : 3 16-bit code units
+      catches       : (none)
+      positions     :
+        0x0000 line=7
+      locals        :
+        0x0000 - 0x0003 reg=1 this Lfixtures/multidex/Callee;
+        0x0000 - 0x0003 reg=2 x I
+  source_file_idx   : 1 (Callee.java)
+
+Class #1            -
+  Class descriptor  : 'Lfixtures/multidex/Dup;'
+  Access flags      : 0x0001 (PUBLIC)
+  Superclass        : 'Ljava/lang/Object;'
+  Interfaces        -
+  Static fields     -
+    #0              : (in Lfixtures/multidex/Dup;)
+      name          : 'MAGIC'
+      type          : 'I'
+      access        : 0x0019 (PUBLIC STATIC FINAL)
+      value         : 2
+  Instance fields   -
+  Direct methods    -
+    #0              : (in Lfixtures/multidex/Dup;)
+      name          : '<init>'
+      type          : '()V'
+      access        : 0x10001 (PUBLIC CONSTRUCTOR)
+      code          -
+      registers     : 1
+      ins           : 1
+      outs          : 1
+      insns size    : 4 16-bit code units
+      catches       : (none)
+      positions     :
+        0x0000 line=4
+      locals        :
+        0x0000 - 0x0004 reg=0 this Lfixtures/multidex/Dup;
+    #1              : (in Lfixtures/multidex/Dup;)
+      name          : 'extra'
+      type          : '()J'
+      access        : 0x0009 (PUBLIC STATIC)
+      code          -
+      registers     : 2
+      ins           : 0
+      outs          : 0
+      insns size    : 6 16-bit code units
+      catches       : (none)
+      positions     :
+        0x0000 line=8
+      locals        :
+    #2              : (in Lfixtures/multidex/Dup;)
+      name          : 'which'
+      type          : '()Ljava/lang/String;'
+      access        : 0x0009 (PUBLIC STATIC)
+      code          -
+      registers     : 1
+      ins           : 0
+      outs          : 0
+      insns size    : 3 16-bit code units
+      catches       : (none)
+      positions     :
+        0x0000 line=6
+      locals        :
+  Virtual methods   -
+    #0              : (in Lfixtures/multidex/Dup;)
+      name          : 'body'
+      type          : '()I'
+      access        : 0x0001 (PUBLIC)
+      code          -
+      registers     : 2
+      ins           : 1
+      outs          : 0
+      insns size    : 3 16-bit code units
+      catches       : (none)
+      positions     :
+        0x0000 line=7
+      locals        :
+        0x0000 - 0x0003 reg=1 this Lfixtures/multidex/Dup;
+  source_file_idx   : 2 (Dup.java)
+

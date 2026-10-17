@@ -1,0 +1,4 @@
+/testdata/build/
+/testdata/dex/*.dexdump*.txt.bak
+*.test
+*.out
