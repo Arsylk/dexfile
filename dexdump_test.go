@@ -2,6 +2,7 @@ package dexfile
 
 import (
 	"bufio"
+	"fmt"
 	"os"
 	"regexp"
 	"strconv"
@@ -83,22 +84,63 @@ var (
 	reMember   = regexp.MustCompile(`^  (Static fields|Instance fields|Direct methods|Virtual methods)\s+-$`)
 )
 
+// parseDexdump parses a dexdump listing of a single DEX file (the first
+// section of a container).
 func parseDexdump(path string) (*dump, error) {
+	ds, err := parseDexdumpSections(path)
+	if err != nil {
+		return nil, err
+	}
+	return ds[0], nil
+}
+
+// parseDexdumpSections splits a dexdump listing at every "Opened '...'" line,
+// which dexdump prints once per DEX file (once per section of a DEX 041
+// container), and parses each part separately.
+func parseDexdumpSections(path string) ([]*dump, error) {
 	fh, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer fh.Close()
-	d := &dump{Header: map[string]string{}, Insns: map[uint32]*dumpInsn{}}
 	sc := bufio.NewScanner(fh)
 	sc.Buffer(make([]byte, 1<<20), 1<<24)
+	var parts [][]string
+	for sc.Scan() {
+		line := sc.Text()
+		if strings.HasPrefix(line, "Opened '") {
+			parts = append(parts, nil)
+			continue
+		}
+		if len(parts) == 0 {
+			if strings.HasPrefix(line, "Processing '") {
+				continue
+			}
+			parts = append(parts, nil) // listing without an "Opened" line
+		}
+		parts[len(parts)-1] = append(parts[len(parts)-1], line)
+	}
+	if sc.Err() != nil {
+		return nil, sc.Err()
+	}
+	if len(parts) == 0 {
+		return nil, fmt.Errorf("%s: empty dexdump listing", path)
+	}
+	out := make([]*dump, len(parts))
+	for i, lines := range parts {
+		out[i] = parseDexdumpLines(lines)
+	}
+	return out, nil
+}
+
+func parseDexdumpLines(lines []string) *dump {
+	d := &dump{Header: map[string]string{}, Insns: map[uint32]*dumpInsn{}}
 	var cls *dumpClass
 	var m *dumpMethod
 	section := "" // catches, positions, locals
 	memberSection := ""
 	inHeader := false
-	for sc.Scan() {
-		line := sc.Text()
+	for _, line := range lines {
 		if strings.HasPrefix(line, "DEX file header:") {
 			inHeader = true
 			continue
@@ -272,7 +314,7 @@ func parseDexdump(path string) (*dump, error) {
 			section = "locals"
 		}
 	}
-	return d, sc.Err()
+	return d
 }
 
 func parseHexFlags(s string) uint32 {

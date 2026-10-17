@@ -16,9 +16,39 @@ const fixtureDir = "testdata/dex"
 
 var fixtureDexes = []string{"tiny", "v035", "v037", "v038", "v039", "release"}
 
+// fixture is one DEX file with dexdump oracles next to it.
+type fixture struct{ name, dir string }
+
+// fixtures returns the committed fixtures plus any external ones. The
+// DEXFILE_EXTRA_FIXTURES environment variable lists directories (separated by
+// the OS path list separator) holding <name>.dex together with
+// <name>.dexdump.txt and <name>.dexdump-f.txt, so the dexdump differential
+// tests can be run over arbitrary real-world DEX files without committing them.
+func fixtures() []fixture {
+	out := make([]fixture, 0, len(fixtureDexes))
+	for _, n := range fixtureDexes {
+		out = append(out, fixture{n, fixtureDir})
+	}
+	for _, dir := range filepath.SplitList(os.Getenv("DEXFILE_EXTRA_FIXTURES")) {
+		if dir == "" {
+			continue
+		}
+		matches, _ := filepath.Glob(filepath.Join(dir, "*.dex"))
+		for _, m := range matches {
+			out = append(out, fixture{strings.TrimSuffix(filepath.Base(m), ".dex"), dir})
+		}
+	}
+	return out
+}
+
 func loadFixture(t testing.TB, name string) ([]byte, *File) {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join(fixtureDir, name+".dex"))
+	return loadFixtureAt(t, fixtureDir, name)
+}
+
+func loadFixtureAt(t testing.TB, dir, name string) ([]byte, *File) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, name+".dex"))
 	if err != nil {
 		t.Skipf("fixture missing: %v (run testdata/build.sh)", err)
 	}
@@ -31,47 +61,94 @@ func loadFixture(t testing.TB, name string) ([]byte, *File) {
 
 func loadDump(t testing.TB, name string) *dump {
 	t.Helper()
-	d, err := parseDexdump(filepath.Join(fixtureDir, name+".dexdump.txt"))
+	return loadDumpAt(t, fixtureDir, name)
+}
+
+func loadDumpAt(t testing.TB, dir, name string) *dump {
+	t.Helper()
+	d, err := parseDexdump(filepath.Join(dir, name+".dexdump.txt"))
 	if err != nil {
 		t.Skipf("dexdump oracle missing: %v", err)
 	}
 	return d
 }
 
+// forEachSection parses every section of a fixture (one for ordinary files,
+// several for a DEX 041 container) and runs fn with the matching part of the
+// dexdump oracle that has the given suffix.
+func forEachSection(t *testing.T, fx fixture, oracle string, fn func(t *testing.T, data []byte, f *File, d *dump)) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(fx.dir, fx.name+".dex"))
+	if err != nil {
+		t.Skipf("fixture missing: %v (run testdata/build.sh)", err)
+	}
+	secs, err := Sections(data)
+	if err != nil {
+		t.Fatalf("%s: sections: %v", fx.name, err)
+	}
+	dumps, err := parseDexdumpSections(filepath.Join(fx.dir, fx.name+oracle))
+	if err != nil {
+		t.Skipf("dexdump oracle missing: %v", err)
+	}
+	if len(dumps) != len(secs) {
+		t.Fatalf("%s: oracle has %d sections, file has %d", fx.name, len(dumps), len(secs))
+	}
+	for i, off := range secs {
+		f, err := ParseAt(data, off)
+		if err != nil {
+			t.Fatalf("%s: parse section %d at %#x: %v", fx.name, i, off, err)
+		}
+		if len(secs) == 1 {
+			fn(t, data, f, dumps[0])
+			return
+		}
+		t.Run(fmt.Sprintf("section%d", i), func(t *testing.T) { fn(t, data, f, dumps[i]) })
+	}
+}
+
+// checkHeaderAgainstDump compares the parsed header with a `dexdump -f` part.
+func checkHeaderAgainstDump(t *testing.T, f *File, d *dump) {
+	t.Helper()
+	checks := map[string]uint32{
+		"file_size": f.Header.FileSize, "header_size": f.Header.HeaderSize,
+		"string_ids_size": f.Header.StringIDsSize, "string_ids_off": f.Header.StringIDsOff,
+		"type_ids_size": f.Header.TypeIDsSize, "type_ids_off": f.Header.TypeIDsOff,
+		"proto_ids_size": f.Header.ProtoIDsSize, "proto_ids_off": f.Header.ProtoIDsOff,
+		"field_ids_size": f.Header.FieldIDsSize, "field_ids_off": f.Header.FieldIDsOff,
+		"method_ids_size": f.Header.MethodIDsSize, "method_ids_off": f.Header.MethodIDsOff,
+		"class_defs_size": f.Header.ClassDefsSize, "class_defs_off": f.Header.ClassDefsOff,
+		"data_size": f.Header.DataSize, "data_off": f.Header.DataOff,
+	}
+	for k, got := range checks {
+		want, ok := d.headerInt(k)
+		if !ok {
+			t.Errorf("oracle lacks %s", k)
+			continue
+		}
+		if uint64(got) != want {
+			t.Errorf("%s: got %d want %d", k, got, want)
+		}
+	}
+	if v, ok := d.headerInt("header_off"); ok && uint64(f.HeaderOff) != v {
+		t.Errorf("header_off: got %d want %d", f.HeaderOff, v)
+	}
+	if v, ok := d.headerInt("container_size"); ok && uint64(f.Header.ContainerSize) != v {
+		t.Errorf("container_size: got %d want %d", f.Header.ContainerSize, v)
+	}
+	if ver := fmt.Sprintf("%03d", f.Version); !strings.Contains(d.Header["magic"], ver) {
+		t.Errorf("version %s not in magic %s", ver, d.Header["magic"])
+	}
+	if len(f.Warnings) != 0 {
+		t.Errorf("unexpected warnings: %+v", f.Warnings)
+	}
+}
+
 func TestHeaderAgainstDexdump(t *testing.T) {
-	for _, name := range fixtureDexes {
-		t.Run(name, func(t *testing.T) {
-			_, f := loadFixture(t, name)
-			d, err := parseDexdump(filepath.Join(fixtureDir, name+".dexdump-f.txt"))
-			if err != nil {
-				t.Skip(err)
-			}
-			checks := map[string]uint32{
-				"file_size": f.Header.FileSize, "header_size": f.Header.HeaderSize,
-				"string_ids_size": f.Header.StringIDsSize, "string_ids_off": f.Header.StringIDsOff,
-				"type_ids_size": f.Header.TypeIDsSize, "type_ids_off": f.Header.TypeIDsOff,
-				"proto_ids_size": f.Header.ProtoIDsSize, "proto_ids_off": f.Header.ProtoIDsOff,
-				"field_ids_size": f.Header.FieldIDsSize, "field_ids_off": f.Header.FieldIDsOff,
-				"method_ids_size": f.Header.MethodIDsSize, "method_ids_off": f.Header.MethodIDsOff,
-				"class_defs_size": f.Header.ClassDefsSize, "class_defs_off": f.Header.ClassDefsOff,
-				"data_size": f.Header.DataSize, "data_off": f.Header.DataOff,
-			}
-			for k, got := range checks {
-				want, ok := d.headerInt(k)
-				if !ok {
-					t.Errorf("oracle lacks %s", k)
-					continue
-				}
-				if uint64(got) != want {
-					t.Errorf("%s: got %d want %d", k, got, want)
-				}
-			}
-			if ver := fmt.Sprintf("%03d", f.Version); !strings.Contains(d.Header["magic"], ver) {
-				t.Errorf("version %s not in magic %s", ver, d.Header["magic"])
-			}
-			if len(f.Warnings) != 0 {
-				t.Errorf("unexpected warnings: %+v", f.Warnings)
-			}
+	for _, fx := range fixtures() {
+		t.Run(fx.name, func(t *testing.T) {
+			forEachSection(t, fx, ".dexdump-f.txt", func(t *testing.T, _ []byte, f *File, d *dump) {
+				checkHeaderAgainstDump(t, f, d)
+			})
 		})
 	}
 }
@@ -98,69 +175,69 @@ func methodByDump(f *File, dm *dumpMethod) (*EncodedMethod, uint32, bool) {
 }
 
 func TestClassesAndMethodsAgainstDexdump(t *testing.T) {
-	for _, name := range fixtureDexes {
-		t.Run(name, func(t *testing.T) {
-			_, f := loadFixture(t, name)
-			d := loadDump(t, name)
-			if len(d.Classes) != len(f.ClassDefs) {
-				t.Fatalf("class count: got %d want %d", len(f.ClassDefs), len(d.Classes))
-			}
-			for _, dc := range d.Classes {
-				ci, ok := f.ClassDefIndex(dc.Desc)
-				if !ok {
-					t.Errorf("class %s not found", dc.Desc)
-					continue
+	for _, fx := range fixtures() {
+		t.Run(fx.name, func(t *testing.T) {
+			forEachSection(t, fx, ".dexdump.txt", func(t *testing.T, _ []byte, f *File, d *dump) {
+				if len(d.Classes) != len(f.ClassDefs) {
+					t.Fatalf("class count: got %d want %d", len(f.ClassDefs), len(d.Classes))
 				}
-				cdef := f.ClassDefs[ci]
-				if cdef.AccessFlags != dc.Access {
-					t.Errorf("%s access: got %#x want %#x", dc.Desc, cdef.AccessFlags, dc.Access)
-				}
-				super := f.TypeDesc(cdef.SuperclassIdx)
-				if cdef.SuperclassIdx == NoIndex {
-					super = ""
-				}
-				if super != dc.Super {
-					t.Errorf("%s super: got %q want %q", dc.Desc, super, dc.Super)
-				}
-				cd := f.ClassData(ci)
-				nm := 0
-				if cd != nil {
-					nm = len(cd.DirectMethods) + len(cd.VirtualMethods)
-				}
-				if nm != len(dc.Methods) {
-					t.Errorf("%s method count: got %d want %d", dc.Desc, nm, len(dc.Methods))
-				}
-				for _, dm := range dc.Methods {
-					em, _, ok := methodByDump(f, dm)
+				for _, dc := range d.Classes {
+					ci, ok := f.ClassDefIndex(dc.Desc)
 					if !ok {
-						t.Errorf("%s->%s%s not found", dm.Class, dm.Name, dm.Type)
+						t.Errorf("class %s not found", dc.Desc)
 						continue
 					}
-					if em.AccessFlags != dm.Access {
-						t.Errorf("%s->%s access: got %#x want %#x", dm.Class, dm.Name, em.AccessFlags, dm.Access)
+					cdef := f.ClassDefs[ci]
+					if cdef.AccessFlags != dc.Access {
+						t.Errorf("%s access: got %#x want %#x", dc.Desc, cdef.AccessFlags, dc.Access)
 					}
-					if (em.CodeOff != 0) != dm.HasCode {
-						t.Errorf("%s->%s has code: got %v want %v", dm.Class, dm.Name, em.CodeOff != 0, dm.HasCode)
-						continue
+					super := f.TypeDesc(cdef.SuperclassIdx)
+					if cdef.SuperclassIdx == NoIndex {
+						super = ""
 					}
-					if !dm.HasCode {
-						continue
+					if super != dc.Super {
+						t.Errorf("%s super: got %q want %q", dc.Desc, super, dc.Super)
 					}
-					if em.CodeOff != dm.CodeOff {
-						t.Errorf("%s->%s code off: got %#x want %#x", dm.Class, dm.Name, em.CodeOff, dm.CodeOff)
+					cd := f.ClassData(ci)
+					nm := 0
+					if cd != nil {
+						nm = len(cd.DirectMethods) + len(cd.VirtualMethods)
 					}
-					code, err := f.Code(em.CodeOff)
-					if err != nil {
-						t.Errorf("%s->%s code: %v", dm.Class, dm.Name, err)
-						continue
+					if nm != len(dc.Methods) {
+						t.Errorf("%s method count: got %d want %d", dc.Desc, nm, len(dc.Methods))
 					}
-					if int(code.RegistersSize) != dm.Regs || int(code.InsSize) != dm.Ins || int(code.OutsSize) != dm.Outs || int(code.InsnsSize) != dm.InsnsSize {
-						t.Errorf("%s->%s code header mismatch: %+v vs %+v", dm.Class, dm.Name, code, dm)
+					for _, dm := range dc.Methods {
+						em, _, ok := methodByDump(f, dm)
+						if !ok {
+							t.Errorf("%s->%s%s not found", dm.Class, dm.Name, dm.Type)
+							continue
+						}
+						if em.AccessFlags != dm.Access {
+							t.Errorf("%s->%s access: got %#x want %#x", dm.Class, dm.Name, em.AccessFlags, dm.Access)
+						}
+						if (em.CodeOff != 0) != dm.HasCode {
+							t.Errorf("%s->%s has code: got %v want %v", dm.Class, dm.Name, em.CodeOff != 0, dm.HasCode)
+							continue
+						}
+						if !dm.HasCode {
+							continue
+						}
+						if em.CodeOff != dm.CodeOff {
+							t.Errorf("%s->%s code off: got %#x want %#x", dm.Class, dm.Name, em.CodeOff, dm.CodeOff)
+						}
+						code, err := f.Code(em.CodeOff)
+						if err != nil {
+							t.Errorf("%s->%s code: %v", dm.Class, dm.Name, err)
+							continue
+						}
+						if int(code.RegistersSize) != dm.Regs || int(code.InsSize) != dm.Ins || int(code.OutsSize) != dm.Outs || int(code.InsnsSize) != dm.InsnsSize {
+							t.Errorf("%s->%s code header mismatch: %+v vs %+v", dm.Class, dm.Name, code, dm)
+						}
+						checkTries(t, f, code, dm)
+						checkDebug(t, f, code, em, dm)
 					}
-					checkTries(t, f, code, dm)
-					checkDebug(t, f, code, em, dm)
 				}
-			}
+			})
 		})
 	}
 }
@@ -260,73 +337,74 @@ var (
 )
 
 func TestInstructionsAgainstDexdump(t *testing.T) {
-	for _, name := range fixtureDexes {
-		t.Run(name, func(t *testing.T) {
-			data, f := loadFixture(t, name)
-			d := loadDump(t, name)
-			seen := 0
-			for _, dc := range d.Classes {
-				for _, dm := range dc.Methods {
-					if !dm.HasCode {
-						continue
-					}
-					em, _, ok := methodByDump(f, dm)
-					if !ok {
-						continue
-					}
-					code, err := f.Code(em.CodeOff)
-					if err != nil {
-						t.Errorf("%s->%s: %v", dm.Class, dm.Name, err)
-						continue
-					}
-					recs, err := code.InsnRecs(f)
-					if err != nil {
-						t.Errorf("%s->%s: sweep: %v", dm.Class, dm.Name, err)
-					}
-					if len(recs) != len(dm.Insns) {
-						t.Errorf("%s->%s: insn count got %d want %d", dm.Class, dm.Name, len(recs), len(dm.Insns))
-						continue
-					}
-					insns := code.Insns(f)
-					for i, di := range dm.Insns {
-						rec := recs[i]
-						seen++
-						in, err := DecodeInsn(insns, rec.Off)
-						if err != nil {
-							t.Errorf("%s->%s @%#x: %v", dm.Class, dm.Name, rec.Off, err)
+	for _, fx := range fixtures() {
+		t.Run(fx.name, func(t *testing.T) {
+			forEachSection(t, fx, ".dexdump.txt", func(t *testing.T, data []byte, f *File, d *dump) {
+				seen, withCode := 0, 0
+				for _, dc := range d.Classes {
+					for _, dm := range dc.Methods {
+						if !dm.HasCode {
 							continue
 						}
-						fo := code.InsnFileOffset(rec.Off)
-						if fo != di.FileOff || rec.Off != di.CUOff {
-							t.Errorf("%s->%s: offsets got (%#x,%#x) want (%#x,%#x)", dm.Class, dm.Name, fo, rec.Off, di.FileOff, di.CUOff)
+						withCode++
+						em, _, ok := methodByDump(f, dm)
+						if !ok {
+							continue
 						}
-						if dumpMnemonic(&in) != di.Mnemonic {
-							t.Errorf("%s->%s @%#x: mnemonic got %s want %s", dm.Class, dm.Name, rec.Off, dumpMnemonic(&in), di.Mnemonic)
+						code, err := f.Code(em.CodeOff)
+						if err != nil {
+							t.Errorf("%s->%s: %v", dm.Class, dm.Name, err)
+							continue
 						}
-						// Raw bytes: compare the shown units against the file.
-						raw := data[fo : fo+uint32(in.Units)*2]
-						for k, u := range di.HexUnits {
-							if k*2+1 >= len(raw) {
-								t.Errorf("%s->%s @%#x: oracle shows more units than decoded size %d", dm.Class, dm.Name, rec.Off, in.Units)
-								break
+						recs, err := code.InsnRecs(f)
+						if err != nil {
+							t.Errorf("%s->%s: sweep: %v", dm.Class, dm.Name, err)
+						}
+						if len(recs) != len(dm.Insns) {
+							t.Errorf("%s->%s: insn count got %d want %d", dm.Class, dm.Name, len(recs), len(dm.Insns))
+							continue
+						}
+						insns := code.Insns(f)
+						for i, di := range dm.Insns {
+							rec := recs[i]
+							seen++
+							in, err := DecodeInsn(insns, rec.Off)
+							if err != nil {
+								t.Errorf("%s->%s @%#x: %v", dm.Class, dm.Name, rec.Off, err)
+								continue
 							}
-							// dexdump prints the unit as two bytes in file order.
-							gotU := uint16(raw[k*2])<<8 | uint16(raw[k*2+1])
-							if gotU != u {
-								t.Errorf("%s->%s @%#x: unit %d got %04x want %04x", dm.Class, dm.Name, rec.Off, k, gotU, u)
+							fo := code.InsnFileOffset(rec.Off)
+							if fo != di.FileOff || rec.Off != di.CUOff {
+								t.Errorf("%s->%s: offsets got (%#x,%#x) want (%#x,%#x)", dm.Class, dm.Name, fo, rec.Off, di.FileOff, di.CUOff)
 							}
+							if dumpMnemonic(&in) != di.Mnemonic {
+								t.Errorf("%s->%s @%#x: mnemonic got %s want %s", dm.Class, dm.Name, rec.Off, dumpMnemonic(&in), di.Mnemonic)
+							}
+							// Raw bytes: compare the shown units against the file.
+							raw := data[fo : fo+uint32(in.Units)*2]
+							for k, u := range di.HexUnits {
+								if k*2+1 >= len(raw) {
+									t.Errorf("%s->%s @%#x: oracle shows more units than decoded size %d", dm.Class, dm.Name, rec.Off, in.Units)
+									break
+								}
+								// dexdump prints the unit as two bytes in file order.
+								gotU := uint16(raw[k*2])<<8 | uint16(raw[k*2+1])
+								if gotU != u {
+									t.Errorf("%s->%s @%#x: unit %d got %04x want %04x", dm.Class, dm.Name, rec.Off, k, gotU, u)
+								}
+							}
+							if !di.Trunc && len(di.HexUnits) != int(in.Units) {
+								t.Errorf("%s->%s @%#x: size got %d units want %d", dm.Class, dm.Name, rec.Off, in.Units, len(di.HexUnits))
+							}
+							checkOperands(t, f, &in, di, dm)
 						}
-						if !di.Trunc && len(di.HexUnits) != int(in.Units) {
-							t.Errorf("%s->%s @%#x: size got %d units want %d", dm.Class, dm.Name, rec.Off, in.Units, len(di.HexUnits))
-						}
-						checkOperands(t, f, &in, di, dm)
 					}
 				}
-			}
-			if seen == 0 {
-				t.Fatal("no instructions compared")
-			}
-			t.Logf("%s: compared %d instructions", name, seen)
+				if seen == 0 && withCode > 0 {
+					t.Fatal("no instructions compared")
+				}
+				t.Logf("%s: compared %d instructions", fx.name, seen)
+			})
 		})
 	}
 }
@@ -334,7 +412,9 @@ func TestInstructionsAgainstDexdump(t *testing.T) {
 func checkOperands(t *testing.T, f *File, in *Insn, di *dumpInsn, dm *dumpMethod) {
 	where := fmt.Sprintf("%s->%s @%#x %s", dm.Class, dm.Name, in.Off, in.Name())
 	// Register lists for invoke / filled-new-array.
-	if m := reRegList.FindStringSubmatch(di.Text); m != nil {
+	// Only list/range invokes and filled-new-array carry a register list;
+	// braces inside string literals of other instructions must not match.
+	if m := reRegList.FindStringSubmatch(di.Text); m != nil && (in.Fmt == Fmt35c || in.Fmt == Fmt3rc || in.Fmt == Fmt45cc || in.Fmt == Fmt4rcc) {
 		var want []uint16
 		s := strings.TrimSpace(m[1])
 		if s != "" {

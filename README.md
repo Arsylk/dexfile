@@ -6,7 +6,9 @@ library. It is the parser behind [dex-mcp](https://github.com/Arsylk/dex-mcp)
 and is meant to be used directly by any tool that needs exact, verifiable
 access to DEX structures: class tables, encoded members, code items with
 tries and handlers, every instruction format and payload, encoded values and
-annotations, debug info, call sites, method handles and hidden-API flags.
+annotations, debug info, call sites, method handles and hidden-API flags. DEX
+041 containers, which hold several DEX files in one buffer, are supported
+through `Sections` and `ParseAt`.
 
 ```
 go get github.com/arsylk/dexfile
@@ -45,7 +47,19 @@ for i, cd := range f.ClassDefs {
 }
 ```
 
-`example_test.go` is the runnable form of this snippet. See `go doc
+A DEX 041 container stores several files back to back; every offset inside
+them is relative to the container start, so each section is parsed over the
+whole buffer:
+
+```go
+secs, err := dexfile.Sections(data) // header offsets; [0] for earlier formats
+for _, off := range secs {
+	f, err := dexfile.ParseAt(data, off)
+	// ...
+}
+```
+
+`example_test.go` is the runnable form of the first snippet. See `go doc
 github.com/arsylk/dexfile` for the full API: `File` for the tables and
 lookups, `CodeItem`/`Insn` for code, `EncodedValue`/`AnnotationItem` for
 static values and annotations, `DebugInfo` for positions and locals, and
@@ -67,6 +81,21 @@ offset back to the structures containing it.
 * DEX versions 035 through 041 are supported, with best-effort handling of
   later versions. ODEX/VDEX/CDEX and big-endian files are rejected with a
   clear error.
+* A DEX 041 container is handled section by section: `Sections` lists the
+  header offsets (the last section ends at `container_size`) and `ParseAt`
+  parses one file over the whole buffer, since offsets are container-relative
+  and tables such as the string pool are shared between sections.
+* Instruction boundaries come from a sweep that classifies each instruction
+  without decoding operands; `DecodeInsn` uses the same classifier, so the two
+  never disagree. Widths are 32-bit, so a switch table with more than 32,767
+  entries is not truncated. A `0x00` opcode whose high byte is not a payload
+  identifier is a one-unit nop, as the runtime computes it.
+* Member index differences in `class_data_item` accumulate in 64 bits, so a
+  hostile difference cannot wrap into a valid-looking index; method handle
+  types and targets are validated like every other table index.
+* A parsed `File` is safe for concurrent use: code items, instruction sweeps
+  and lookup tables are built at most once, and warnings reported during lazy
+  parsing can be read with `WarningsSnapshot`.
 
 ## Verification
 
@@ -81,19 +110,41 @@ offset back to the structures containing it.
 * `internal/upstream` runs differential tests against
   `github.com/grassto/androguard-go` with every disagreement classified; see
   `docs/UPSTREAM_AUDIT.md`. That module is a test-only dependency.
+* The same dexdump differential runs over arbitrary external files: point
+  `DEXFILE_EXTRA_FIXTURES` at directories holding `<name>.dex` with
+  `<name>.dexdump.txt` and `<name>.dexdump-f.txt` next to it (containers are
+  compared section by section). Over the ten DEX files of a production
+  Kotlin/Compose application (82 MB, 112,887 classes, 523,773 methods,
+  7,009,567 instructions) every header field, class table, try block, debug
+  position, local and instruction matched dexdump.
+* `TestSweepMatchesDecode` checks the boundary sweep against full decoding on
+  every method of every fixture, `TestConcurrentLazyParsing` runs under the
+  race detector, and the whole suite passes `go test -race`.
 
 ```
 go test ./...
+go test -race ./...
 go test . -fuzz FuzzParse -fuzztime 60s
+DEXFILE_EXTRA_FIXTURES=/path/to/dumps go test -run AgainstDexdump -v .
 ```
+
+## Performance
+
+Single-threaded, measured on the ten DEX files above (AMD Ryzen 7 5700X, Go
+1.27): parsing all headers, tables, strings and class data takes about 0.2 s;
+parsing every code item and sweeping its instruction boundaries about 0.55 s;
+decoding the operands of all 7 million instructions about 0.25 s; static
+values, annotations and debug info under 0.1 s. Parsing retains the input
+slice and allocates no per-field names unless a `*Fields` method asks for byte
+ranges, so a full pass over the 82 MB performs under ten million allocations.
 
 ## Fixtures
 
 `testdata/dex` is generated from the Java sources under `testdata/java` by
-`testdata/build.sh` (needs a JDK and Android build-tools `d8`/`dexdump`);
-`testdata/README.md` describes every fixture. The committed files are the
-ones the tests run against, so the build script is only needed to change
-them.
+`testdata/build.sh` (needs a JDK and Android build-tools `d8`, `lib/d8.jar`
+and `dexdump`); `testdata/README.md` describes every fixture, including the
+DEX 041 container ones. The committed files are the ones the tests run
+against, so the build script is only needed to change them.
 
 ## Non-goals
 

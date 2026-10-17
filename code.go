@@ -2,6 +2,7 @@ package dexfile
 
 import (
 	"fmt"
+	"sync"
 )
 
 // TryItem is a try_item with its range.
@@ -48,9 +49,9 @@ type CodeItem struct {
 	Tries    []TryItem
 	Handlers []CatchHandler
 
-	insnsErr error // first instruction decoding problem, if any (lazy)
+	recsOnce sync.Once
 	recs     []InsnRec
-	recsDone bool
+	insnsErr error // first instruction decoding problem, if any (lazy)
 }
 
 // Insns returns the raw instruction bytes (little-endian code units).
@@ -59,14 +60,15 @@ func (ci *CodeItem) Insns(f *File) []byte {
 	return b
 }
 
-// Code parses (and caches) the code_item at the given offset.
+// Code parses (and caches) the code_item at the given offset. It is safe for
+// concurrent use; every caller receives the same *CodeItem for an offset.
 func (f *File) Code(off uint32) (*CodeItem, error) {
-	f.codeMu.Lock()
-	if ci, ok := f.codeCache[off]; ok {
-		f.codeMu.Unlock()
+	f.codeMu.RLock()
+	ci, ok := f.codeCache[off]
+	f.codeMu.RUnlock()
+	if ok {
 		return ci, nil
 	}
-	f.codeMu.Unlock()
 	ci, err := f.parseCode(off, nil)
 	if err != nil {
 		return nil, err
@@ -129,9 +131,15 @@ func (f *File) parseCode(off uint32, rec *[]FieldView) (*CodeItem, error) {
 		for i := range ci.Tries {
 			t := &ci.Tries[i]
 			start := c.Pos()
-			t.StartAddr = c.u32(fmt.Sprintf("tries[%d].start_addr", i))
-			t.InsnCount = c.u16(fmt.Sprintf("tries[%d].insn_count", i))
-			t.HandlerOff = c.u16(fmt.Sprintf("tries[%d].handler_off", i))
+			var nStart, nCount, nOff string
+			if rec != nil {
+				nStart = fmt.Sprintf("tries[%d].start_addr", i)
+				nCount = fmt.Sprintf("tries[%d].insn_count", i)
+				nOff = fmt.Sprintf("tries[%d].handler_off", i)
+			}
+			t.StartAddr = c.u32(nStart)
+			t.InsnCount = c.u16(nCount)
+			t.HandlerOff = c.u16(nOff)
 			t.Range = Range{start, 8}
 			t.HandlerIdx = -1
 			if c.Err() == nil && uint64(t.StartAddr)+uint64(t.InsnCount) > uint64(ci.InsnsSize) {
@@ -157,7 +165,11 @@ func (f *File) parseCode(off uint32, rec *[]FieldView) (*CodeItem, error) {
 			if rel > 0xffff {
 				return nil, perr("encoded_catch_handler", hStart, fmt.Errorf("%w: handler offset exceeds 16 bits", ErrInvalid))
 			}
-			size := c.sleb(fmt.Sprintf("handlers[%d].size", i))
+			var nSize string
+			if rec != nil {
+				nSize = fmt.Sprintf("handlers[%d].size", i)
+			}
+			size := c.sleb(nSize)
 			if c.Err() != nil {
 				return nil, c.Err()
 			}
@@ -170,8 +182,13 @@ func (f *File) parseCode(off uint32, rec *[]FieldView) (*CodeItem, error) {
 			}
 			h := CatchHandler{ListOff: uint16(rel), CatchAllAddr: -1, Catches: make([]TypeAddrPair, 0, abs)}
 			for j := int32(0); j < abs; j++ {
-				ti := c.uleb(fmt.Sprintf("handlers[%d].handlers[%d].type_idx", i, j))
-				addr := c.uleb(fmt.Sprintf("handlers[%d].handlers[%d].addr", i, j))
+				var nType, nAddr string
+				if rec != nil {
+					nType = fmt.Sprintf("handlers[%d].handlers[%d].type_idx", i, j)
+					nAddr = fmt.Sprintf("handlers[%d].handlers[%d].addr", i, j)
+				}
+				ti := c.uleb(nType)
+				addr := c.uleb(nAddr)
 				if c.Err() != nil {
 					return nil, c.Err()
 				}
@@ -184,7 +201,11 @@ func (f *File) parseCode(off uint32, rec *[]FieldView) (*CodeItem, error) {
 				h.Catches = append(h.Catches, TypeAddrPair{TypeIdx: ti, Addr: addr})
 			}
 			if size <= 0 {
-				ca := c.uleb(fmt.Sprintf("handlers[%d].catch_all_addr", i))
+				var nAll string
+				if rec != nil {
+					nAll = fmt.Sprintf("handlers[%d].catch_all_addr", i)
+				}
+				ca := c.uleb(nAll)
 				if c.Err() != nil {
 					return nil, c.Err()
 				}
@@ -220,14 +241,12 @@ func (f *File) parseCode(off uint32, rec *[]FieldView) (*CodeItem, error) {
 
 // InsnRecs returns the linear-sweep instruction records for the code item,
 // decoding them on first use. The error (if any) reports where decoding
-// stopped; records before that point remain valid.
+// stopped; records before that point remain valid. It is safe for concurrent
+// use and the sweep runs at most once per code item.
 func (ci *CodeItem) InsnRecs(f *File) ([]InsnRec, error) {
-	f.codeMu.Lock()
-	defer f.codeMu.Unlock()
-	if !ci.recsDone {
+	ci.recsOnce.Do(func() {
 		ci.recs, ci.insnsErr = SweepInsns(ci.Insns(f))
-		ci.recsDone = true
-	}
+	})
 	return ci.recs, ci.insnsErr
 }
 
@@ -251,8 +270,8 @@ func (ci *CodeItem) HandlersFor(addr uint32) *CatchHandler {
 	return nil
 }
 
-// EncodedMethodByIdx finds the encoded_method for a method index within class
-// data, returning the method and whether it is virtual.
+// FindMethod finds the encoded_method for a method index within class data,
+// returning the method and whether it is virtual.
 func (cd *ClassData) FindMethod(methodIdx uint32) (*EncodedMethod, bool, bool) {
 	for i := range cd.DirectMethods {
 		if cd.DirectMethods[i].MethodIdx == methodIdx {

@@ -1,0 +1,53 @@
+Processing '/opt/github/dexfile/testdata/dex/container041.dex'...
+Opened '/opt/github/dexfile/testdata/dex/container041.dex:classes.dex', DEX version '041'
+DEX file header:
+magic               : 'dex\n041\0'
+checksum            : d4d0b367
+signature           : 6d27...273f
+container_size      : 1402688
+file_size           : 27384
+header_size         : 120
+header_off          : 0 (0x000000)
+link_size           : 0
+link_off            : 0 (0x000000)
+string_ids_size     : 1594
+string_ids_off      : 27504 (0x006b70)
+type_ids_size       : 21
+type_ids_off        : 120 (0x000078)
+proto_ids_size      : 5
+proto_ids_off       : 204 (0x0000cc)
+field_ids_size      : 1
+field_ids_off       : 264 (0x000108)
+method_ids_size     : 1176
+method_ids_off      : 272 (0x000110)
+class_defs_size     : 13
+class_defs_off      : 9680 (0x0025d0)
+data_size           : 0
+data_off            : 0 (0x000000)
+
+Opened '/opt/github/dexfile/testdata/dex/container041.dex:classes2.dex', DEX version '041'
+DEX file header:
+magic               : 'dex\n041\0'
+checksum            : 8b823171
+signature           : 3f66...7c71
+container_size      : 1402688
+file_size           : 1375304
+header_size         : 120
+header_off          : 27384 (0x006af8)
+link_size           : 0
+link_off            : 0 (0x000000)
+string_ids_size     : 1594
+string_ids_off      : 27504 (0x006b70)
+type_ids_size       : 731
+type_ids_off        : 33880 (0x008458)
+proto_ids_size      : 1
+proto_ids_off       : 36804 (0x008fc4)
+field_ids_size      : 0
+field_ids_off       : 0 (0x000000)
+method_ids_size     : 65520
+method_ids_off      : 36816 (0x008fd0)
+class_defs_size     : 728
+class_defs_off      : 560976 (0x088f50)
+data_size           : 0
+data_off            : 0 (0x000000)
+

@@ -372,8 +372,8 @@ func (f *File) StructuresOverlapping(r Range, kind uint16) []StructRef {
 }
 
 func (f *File) codeByHandlersRange(r Range) *CodeItem {
-	f.codeMu.Lock()
-	defer f.codeMu.Unlock()
+	f.codeMu.RLock()
+	defer f.codeMu.RUnlock()
 	for _, ci := range f.codeCache {
 		if ci.HandlersRange == r {
 			return ci

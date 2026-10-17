@@ -137,7 +137,11 @@ func (f *File) parseDebugInfo(off uint32, insnsSize uint32, rec *[]FieldView, se
 	}
 	di.ParameterNames = make([]int32, n)
 	for i := range di.ParameterNames {
-		v := c.ulebp1(fmt.Sprintf("parameter_names[%d]", i))
+		var name string
+		if rec != nil {
+			name = fmt.Sprintf("parameter_names[%d]", i)
+		}
+		v := c.ulebp1(name)
 		if v >= 0 && uint32(v) >= f.Header.StringIDsSize {
 			f.warn("debug parameter name index out of range", c.Pos())
 			v = -1

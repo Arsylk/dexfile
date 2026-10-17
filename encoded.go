@@ -206,7 +206,11 @@ func (f *File) readEncodedArray(c *cursor, prefix string, depth int) ([]EncodedV
 	}
 	vals := make([]EncodedValue, 0, n)
 	for i := uint32(0); i < n; i++ {
-		v, err := f.readEncodedValue(c, fmt.Sprintf("%svalues[%d]", prefix, i), depth+1)
+		var name string
+		if c.rec != nil {
+			name = fmt.Sprintf("%svalues[%d]", prefix, i)
+		}
+		v, err := f.readEncodedValue(c, name, depth+1)
 		if err != nil {
 			return nil, err
 		}
@@ -371,14 +375,19 @@ func (f *File) readEncodedAnnotation(c *cursor, prefix string, depth int) (*Enco
 	}
 	ann.Elements = make([]AnnotationElement, 0, n)
 	for i := uint32(0); i < n; i++ {
-		nameIdx := c.uleb(fmt.Sprintf("%selements[%d].name_idx", prefix, i))
+		var nName, nValue string
+		if c.rec != nil {
+			nName = fmt.Sprintf("%selements[%d].name_idx", prefix, i)
+			nValue = fmt.Sprintf("%selements[%d]", prefix, i)
+		}
+		nameIdx := c.uleb(nName)
 		if c.Err() != nil {
 			return nil, c.Err()
 		}
 		if nameIdx >= f.Header.StringIDsSize {
 			return nil, perr("encoded_annotation", c.Pos(), fmt.Errorf("%w: name_idx %d", ErrInvalid, nameIdx))
 		}
-		v, err := f.readEncodedValue(c, fmt.Sprintf("%selements[%d]", prefix, i), depth+1)
+		v, err := f.readEncodedValue(c, nValue, depth+1)
 		if err != nil {
 			return nil, err
 		}
@@ -444,7 +453,11 @@ func (f *File) parseAnnotationSet(off uint32, rec *[]FieldView) (*AnnotationSet,
 	}
 	as := &AnnotationSet{Offsets: make([]uint32, n)}
 	for i := range as.Offsets {
-		as.Offsets[i] = c.u32(fmt.Sprintf("entries[%d].annotation_off", i))
+		var name string
+		if rec != nil {
+			name = fmt.Sprintf("entries[%d].annotation_off", i)
+		}
+		as.Offsets[i] = c.u32(name)
 		if uint64(as.Offsets[i]) >= uint64(len(f.data)) {
 			return nil, perr("annotation_set_item", c.Pos()-4, ErrOutOfBounds)
 		}
@@ -480,7 +493,11 @@ func (f *File) parseAnnotationSetRefList(off uint32, rec *[]FieldView) (*Annotat
 	}
 	l := &AnnotationSetRefList{Offsets: make([]uint32, n)}
 	for i := range l.Offsets {
-		l.Offsets[i] = c.u32(fmt.Sprintf("list[%d].annotations_off", i))
+		var name string
+		if rec != nil {
+			name = fmt.Sprintf("list[%d].annotations_off", i)
+		}
+		l.Offsets[i] = c.u32(name)
 		if uint64(l.Offsets[i]) >= uint64(len(f.data)) {
 			return nil, perr("annotation_set_ref_list", c.Pos()-4, ErrOutOfBounds)
 		}
@@ -520,24 +537,39 @@ func (f *File) parseAnnotationsDirectory(off uint32, rec *[]FieldView) (*Annotat
 	}
 	d.FieldAnnotations = make([]FieldAnnotation, nf)
 	for i := range d.FieldAnnotations {
-		d.FieldAnnotations[i].FieldIdx = c.u32(fmt.Sprintf("field_annotations[%d].field_idx", i))
-		d.FieldAnnotations[i].AnnotationsOff = c.u32(fmt.Sprintf("field_annotations[%d].annotations_off", i))
+		var nIdx, nOff string
+		if rec != nil {
+			nIdx = fmt.Sprintf("field_annotations[%d].field_idx", i)
+			nOff = fmt.Sprintf("field_annotations[%d].annotations_off", i)
+		}
+		d.FieldAnnotations[i].FieldIdx = c.u32(nIdx)
+		d.FieldAnnotations[i].AnnotationsOff = c.u32(nOff)
 		if d.FieldAnnotations[i].FieldIdx >= f.Header.FieldIDsSize {
 			return nil, perr("annotations_directory_item", c.Pos()-8, fmt.Errorf("%w: field_idx", ErrInvalid))
 		}
 	}
 	d.MethodAnnotations = make([]MethodAnnotation, nm)
 	for i := range d.MethodAnnotations {
-		d.MethodAnnotations[i].MethodIdx = c.u32(fmt.Sprintf("method_annotations[%d].method_idx", i))
-		d.MethodAnnotations[i].AnnotationsOff = c.u32(fmt.Sprintf("method_annotations[%d].annotations_off", i))
+		var nIdx, nOff string
+		if rec != nil {
+			nIdx = fmt.Sprintf("method_annotations[%d].method_idx", i)
+			nOff = fmt.Sprintf("method_annotations[%d].annotations_off", i)
+		}
+		d.MethodAnnotations[i].MethodIdx = c.u32(nIdx)
+		d.MethodAnnotations[i].AnnotationsOff = c.u32(nOff)
 		if d.MethodAnnotations[i].MethodIdx >= f.Header.MethodIDsSize {
 			return nil, perr("annotations_directory_item", c.Pos()-8, fmt.Errorf("%w: method_idx", ErrInvalid))
 		}
 	}
 	d.ParameterAnnotations = make([]ParameterAnnotation, np)
 	for i := range d.ParameterAnnotations {
-		d.ParameterAnnotations[i].MethodIdx = c.u32(fmt.Sprintf("parameter_annotations[%d].method_idx", i))
-		d.ParameterAnnotations[i].AnnotationsOff = c.u32(fmt.Sprintf("parameter_annotations[%d].annotations_off", i))
+		var nIdx, nOff string
+		if rec != nil {
+			nIdx = fmt.Sprintf("parameter_annotations[%d].method_idx", i)
+			nOff = fmt.Sprintf("parameter_annotations[%d].annotations_off", i)
+		}
+		d.ParameterAnnotations[i].MethodIdx = c.u32(nIdx)
+		d.ParameterAnnotations[i].AnnotationsOff = c.u32(nOff)
 		if d.ParameterAnnotations[i].MethodIdx >= f.Header.MethodIDsSize {
 			return nil, perr("annotations_directory_item", c.Pos()-8, fmt.Errorf("%w: method_idx", ErrInvalid))
 		}

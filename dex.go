@@ -159,10 +159,15 @@ type Warning struct {
 }
 
 // File is a parsed, immutable DEX file.
+//
+// For a DEX 041 container, data is the whole container and HeaderOff is the
+// offset of this file's header inside it; every other offset in the file is
+// relative to the container start, exactly as stored.
 type File struct {
-	data    []byte
-	Version int // 35, 37, 38, 39, 40, 41, ...
-	Header  Header
+	data      []byte
+	HeaderOff uint32 // offset of header_item within data (0 except in containers)
+	Version   int    // 35, 37, 38, 39, 40, 41, ...
+	Header    Header
 
 	StringIDs     []uint32 // string_data_off per string
 	TypeIDs       []uint32 // descriptor string idx per type
@@ -175,7 +180,11 @@ type File struct {
 	MapList       []MapItem
 	MapListRange  Range
 
+	// Warnings collects non-fatal inconsistencies. Parse fills it; lazily
+	// parsed structures (code items, debug info, lookups) may append to it
+	// later, so concurrent users should read it through WarningsSnapshot.
 	Warnings []Warning
+	warnMu   sync.Mutex
 
 	strings      []stringItem
 	classData    []*ClassData // indexed by class def; nil when class has no data or it failed
@@ -187,7 +196,7 @@ type File struct {
 	classByType map[uint32]uint32 // type idx -> class def idx
 	stringByVal map[string]uint32
 
-	codeMu    sync.Mutex
+	codeMu    sync.RWMutex
 	codeCache map[uint32]*CodeItem
 
 	hiddenAPI *hiddenAPIData
@@ -198,36 +207,110 @@ type File struct {
 }
 
 // Parse parses a DEX file image. The slice is retained (not copied) and must
-// not be modified afterwards.
-func Parse(data []byte) (f *File, err error) {
+// not be modified afterwards. For a DEX 041 container it parses the first
+// section; use Sections and ParseAt to reach the others.
+func Parse(data []byte) (*File, error) {
+	return ParseAt(data, 0)
+}
+
+// ParseAt parses the DEX file whose header_item starts at headerOff within
+// data. It exists for DEX 041 containers, where data is the whole container
+// and several files follow each other, each with its own header; all offsets
+// stored in such a file are relative to the container start, so the whole
+// container must be passed. For earlier formats headerOff must be 0.
+func ParseAt(data []byte, headerOff uint32) (f *File, err error) {
 	defer func() {
 		// Belt and braces: the parser is written to be bounds-safe, but a
 		// panic must never escape to the caller on hostile input.
 		if r := recover(); r != nil {
 			f = nil
-			err = perr("parser", 0, fmt.Errorf("internal error: %v", r))
+			err = perr("parser", headerOff, fmt.Errorf("internal error: %v", r))
 		}
 	}()
-	return parse(data)
+	return parseAt(data, headerOff)
 }
 
-func parse(data []byte) (*File, error) {
+// magicVersion validates the magic at the start of hd and returns the version.
+func magicVersion(hd []byte, at uint32) (int, error) {
+	if len(hd) < 8 {
+		return 0, perr("header", at, ErrTruncated)
+	}
+	if !bytes.Equal(hd[0:4], []byte("dex\n")) || hd[7] != 0 {
+		if bytes.Equal(hd[0:4], []byte("dey\n")) {
+			return 0, perr("header", at, fmt.Errorf("%w: optimized DEX (ODEX) is not supported", ErrBadMagic))
+		}
+		return 0, perr("header", at, ErrBadMagic)
+	}
+	ver := 0
+	for _, ch := range hd[4:7] {
+		if ch < '0' || ch > '9' {
+			return 0, perr("header", at+4, fmt.Errorf("%w: unknown version %q", ErrBadMagic, string(hd[4:7])))
+		}
+		ver = ver*10 + int(ch-'0')
+	}
+	if ver < 35 {
+		return 0, perr("header", at+4, fmt.Errorf("%w: unknown version %q", ErrBadMagic, string(hd[4:7])))
+	}
+	return ver, nil
+}
+
+// isContainerHeader reports whether a header at hd has the DEX 041 container
+// fields (version 041 or later with header_size >= 0x78).
+func isContainerHeader(hd []byte, ver int) bool {
+	return ver >= 41 && len(hd) >= 0x78 && le32(hd[36:]) >= 0x78
+}
+
+// Sections returns the header offsets of the DEX files stored in data. A DEX
+// 041 container holds several files back to back, each starting with its own
+// header_item and spanning its header's file_size; the last one ends at
+// container_size. Every offset inside such a container is relative to the
+// container start, so each section must be parsed with ParseAt over the
+// whole buffer. Earlier formats and single-file containers yield one offset, 0.
+func Sections(data []byte) ([]uint32, error) {
+	ver, err := magicVersion(data, 0)
+	if err != nil {
+		return nil, err
+	}
 	if len(data) < 0x70 {
 		return nil, perr("header", 0, ErrTruncated)
 	}
-	if !bytes.Equal(data[0:4], []byte("dex\n")) || data[7] != 0 {
-		if bytes.Equal(data[0:4], []byte("dey\n")) {
-			return nil, perr("header", 0, fmt.Errorf("%w: optimized DEX (ODEX) is not supported", ErrBadMagic))
+	if !isContainerHeader(data, ver) {
+		return []uint32{0}, nil
+	}
+	total := uint64(len(data))
+	if cs := uint64(le32(data[0x70:])); cs >= 0x70 && cs < total {
+		total = cs
+	}
+	var out []uint32
+	for off := uint64(0); off < total; {
+		if off+0x70 > total {
+			return nil, perr("container", uint32(off), fmt.Errorf("%w: section %d header", ErrTruncated, len(out)))
 		}
-		return nil, perr("header", 0, ErrBadMagic)
+		if _, err := magicVersion(data[off:], uint32(off)); err != nil {
+			return nil, perr("container", uint32(off), fmt.Errorf("section %d: %w", len(out), err))
+		}
+		fs := uint64(le32(data[off+32:]))
+		if fs < 0x70 || off+fs > total {
+			return nil, perr("container", uint32(off), fmt.Errorf("%w: section %d file_size %d", ErrInvalid, len(out), fs))
+		}
+		out = append(out, uint32(off))
+		off += fs
 	}
-	ver, convErr := strconv.Atoi(string(data[4:7]))
-	if convErr != nil || ver < 35 {
-		return nil, perr("header", 4, fmt.Errorf("%w: unknown version %q", ErrBadMagic, string(data[4:7])))
+	return out, nil
+}
+
+func parseAt(data []byte, headerOff uint32) (*File, error) {
+	if uint64(headerOff)+0x70 > uint64(len(data)) {
+		return nil, perr("header", headerOff, ErrTruncated)
 	}
-	f := &File{data: data, Version: ver, codeCache: make(map[uint32]*CodeItem)}
+	hd := data[headerOff:]
+	ver, err := magicVersion(hd, headerOff)
+	if err != nil {
+		return nil, err
+	}
+	f := &File{data: data, HeaderOff: headerOff, Version: ver, codeCache: make(map[uint32]*CodeItem)}
 	if ver > 41 {
-		f.warn("untested DEX version "+strconv.Itoa(ver), 4)
+		f.warn("untested DEX version "+strconv.Itoa(ver), headerOff+4)
 	}
 	if err := f.parseHeader(nil); err != nil {
 		return nil, err
@@ -235,15 +318,29 @@ func parse(data []byte) (*File, error) {
 	h := &f.Header
 	if h.EndianTag != 0x12345678 {
 		if h.EndianTag == 0x78563412 {
-			return nil, perr("header.endian_tag", 40, fmt.Errorf("%w: big-endian DEX is not supported", ErrInvalid))
+			return nil, perr("header.endian_tag", headerOff+40, fmt.Errorf("%w: big-endian DEX is not supported", ErrInvalid))
 		}
-		f.warn(fmt.Sprintf("unexpected endian_tag 0x%08x", h.EndianTag), 40)
+		f.warn(fmt.Sprintf("unexpected endian_tag 0x%08x", h.EndianTag), headerOff+40)
 	}
-	if uint64(h.FileSize) != uint64(len(data)) {
-		f.warn(fmt.Sprintf("header file_size %d != actual %d", h.FileSize, len(data)), 32)
+	if isContainerHeader(hd, ver) {
+		if h.HeaderOffset != headerOff {
+			f.warn(fmt.Sprintf("header_offset %d != actual %d", h.HeaderOffset, headerOff), headerOff+0x74)
+		}
+		if uint64(h.ContainerSize) != uint64(len(data)) {
+			f.warn(fmt.Sprintf("container_size %d != actual %d", h.ContainerSize, len(data)), headerOff+0x70)
+		}
+		if uint64(headerOff)+uint64(h.FileSize) > uint64(len(data)) {
+			f.warn(fmt.Sprintf("file_size %d exceeds the container", h.FileSize), headerOff+32)
+		}
+	} else {
+		if headerOff != 0 {
+			return nil, perr("header", headerOff, fmt.Errorf("%w: DEX %03d has no container header and must start at offset 0", ErrInvalid, ver))
+		}
+		if uint64(h.FileSize) != uint64(len(data)) {
+			f.warn(fmt.Sprintf("header file_size %d != actual %d", h.FileSize, len(data)), 32)
+		}
 	}
 
-	var err error
 	if err = f.parseStringIDs(); err != nil {
 		return nil, err
 	}
@@ -272,9 +369,20 @@ func parse(data []byte) (*File, error) {
 }
 
 func (f *File) warn(what string, off uint32) {
+	f.warnMu.Lock()
 	if len(f.Warnings) < 256 {
 		f.Warnings = append(f.Warnings, Warning{What: what, Offset: off})
 	}
+	f.warnMu.Unlock()
+}
+
+// WarningsSnapshot returns a copy of the warnings recorded so far. Unlike
+// reading the Warnings field directly, it is safe while other goroutines are
+// still parsing lazily evaluated structures of the same file.
+func (f *File) WarningsSnapshot() []Warning {
+	f.warnMu.Lock()
+	defer f.warnMu.Unlock()
+	return append([]Warning(nil), f.Warnings...)
 }
 
 // Data returns the underlying file bytes. Callers must not modify them.
@@ -292,7 +400,7 @@ func (f *File) Bytes(r Range) ([]byte, error) {
 }
 
 func (f *File) parseHeader(rec *[]FieldView) error {
-	c := newCursor(f.data, 0, "header")
+	c := newCursor(f.data, f.HeaderOff, "header")
 	c.rec = rec
 	h := &f.Header
 	copy(h.Magic[:], c.bytes("magic", 8))
@@ -321,12 +429,12 @@ func (f *File) parseHeader(rec *[]FieldView) error {
 	if c.Err() != nil {
 		return c.Err()
 	}
-	if h.HeaderSize >= 0x78 && len(f.data) >= 0x78 {
+	if h.HeaderSize >= 0x78 && uint64(f.HeaderOff)+0x78 <= uint64(len(f.data)) {
 		h.ContainerSize = c.u32("container_size")
 		h.HeaderOffset = c.u32("header_offset")
 	}
 	if h.HeaderSize != 0x70 && h.HeaderSize != 0x78 {
-		f.warn(fmt.Sprintf("unexpected header_size 0x%x", h.HeaderSize), 36)
+		f.warn(fmt.Sprintf("unexpected header_size 0x%x", h.HeaderSize), f.HeaderOff+36)
 	}
 	return c.Err()
 }
@@ -334,16 +442,16 @@ func (f *File) parseHeader(rec *[]FieldView) error {
 // HeaderRange returns the byte range of the header_item.
 func (f *File) HeaderRange() Range {
 	n := f.Header.HeaderSize
-	if n < 0x70 || uint64(n) > uint64(len(f.data)) {
+	if n < 0x70 || uint64(f.HeaderOff)+uint64(n) > uint64(len(f.data)) {
 		n = 0x70
 	}
-	return Range{0, n}
+	return Range{f.HeaderOff, n}
 }
 
 // HeaderFields returns the header fields with their byte ranges.
 func (f *File) HeaderFields() []FieldView {
 	var views []FieldView
-	g := &File{data: f.data}
+	g := &File{data: f.data, HeaderOff: f.HeaderOff}
 	_ = g.parseHeader(&views)
 	return views
 }
@@ -586,10 +694,24 @@ func (f *File) parseCallSitesAndHandles() error {
 		f.MethodHandles = make([]MethodHandle, m.Size)
 		c := newCursor(f.data, m.Offset, "method_handles")
 		for i := range f.MethodHandles {
-			f.MethodHandles[i].Type = c.u16("")
+			mh := &f.MethodHandles[i]
+			mh.Type = c.u16("")
 			c.u16("")
-			f.MethodHandles[i].FieldOrMethodID = c.u16("")
+			mh.FieldOrMethodID = c.u16("")
 			c.u16("")
+			if c.Err() != nil {
+				break
+			}
+			if mh.Type > MHInvokeInterface {
+				return perr("method_handles", c.Pos()-8, fmt.Errorf("%w: method_handle_type %d in method handle %d", ErrInvalid, mh.Type, i))
+			}
+			limit := f.Header.MethodIDsSize
+			if mh.IsFieldHandle() {
+				limit = f.Header.FieldIDsSize
+			}
+			if uint32(mh.FieldOrMethodID) >= limit {
+				return perr("method_handles", c.Pos()-8, fmt.Errorf("%w: field_or_method_id %d out of range in method handle %d", ErrInvalid, mh.FieldOrMethodID, i))
+			}
 		}
 		if c.Err() != nil {
 			return c.Err()
@@ -650,43 +772,64 @@ func (f *File) parseClassData(off uint32, rec *[]FieldView) (*ClassData, error) 
 	if need > uint64(c.remaining()) {
 		return nil, perr("class_data_item", off, fmt.Errorf("%w: member counts %d/%d/%d/%d", ErrTooLarge, ns, ni, nd, nv))
 	}
+	// Member indices are encoded as differences from the previous entry (the
+	// first is absolute). Accumulate in 64 bits so a hostile difference cannot
+	// wrap around into a valid-looking index; a non-increasing index is kept
+	// (the runtime rejects such files) but recorded as a warning.
 	readFields := func(n uint32, label string) ([]EncodedField, error) {
 		out := make([]EncodedField, 0, n)
-		var idx uint32
+		var idx uint64
 		for i := uint32(0); i < n; i++ {
 			start := c.Pos()
-			diff := c.uleb(fmt.Sprintf("%s[%d].field_idx_diff", label, i))
-			flags := c.uleb(fmt.Sprintf("%s[%d].access_flags", label, i))
+			var nDiff, nFlags string
+			if rec != nil {
+				nDiff = fmt.Sprintf("%s[%d].field_idx_diff", label, i)
+				nFlags = fmt.Sprintf("%s[%d].access_flags", label, i)
+			}
+			diff := c.uleb(nDiff)
+			flags := c.uleb(nFlags)
 			if c.Err() != nil {
 				return nil, c.Err()
 			}
-			idx += diff
-			if idx >= f.Header.FieldIDsSize {
+			if i > 0 && diff == 0 {
+				f.warn(fmt.Sprintf("class_data_item %s[%d] repeats the previous field_idx", label, i), start)
+			}
+			idx += uint64(diff)
+			if idx >= uint64(f.Header.FieldIDsSize) {
 				return nil, perr("class_data_item", start, fmt.Errorf("%w: field_idx %d out of range", ErrInvalid, idx))
 			}
-			out = append(out, EncodedField{FieldIdx: idx, AccessFlags: flags, Range: Range{start, c.Pos() - start}})
+			out = append(out, EncodedField{FieldIdx: uint32(idx), AccessFlags: flags, Range: Range{start, c.Pos() - start}})
 		}
 		return out, nil
 	}
 	readMethods := func(n uint32, label string) ([]EncodedMethod, error) {
 		out := make([]EncodedMethod, 0, n)
-		var idx uint32
+		var idx uint64
 		for i := uint32(0); i < n; i++ {
 			start := c.Pos()
-			diff := c.uleb(fmt.Sprintf("%s[%d].method_idx_diff", label, i))
-			flags := c.uleb(fmt.Sprintf("%s[%d].access_flags", label, i))
-			codeOff := c.uleb(fmt.Sprintf("%s[%d].code_off", label, i))
+			var nDiff, nFlags, nCode string
+			if rec != nil {
+				nDiff = fmt.Sprintf("%s[%d].method_idx_diff", label, i)
+				nFlags = fmt.Sprintf("%s[%d].access_flags", label, i)
+				nCode = fmt.Sprintf("%s[%d].code_off", label, i)
+			}
+			diff := c.uleb(nDiff)
+			flags := c.uleb(nFlags)
+			codeOff := c.uleb(nCode)
 			if c.Err() != nil {
 				return nil, c.Err()
 			}
-			idx += diff
-			if idx >= f.Header.MethodIDsSize {
+			if i > 0 && diff == 0 {
+				f.warn(fmt.Sprintf("class_data_item %s[%d] repeats the previous method_idx", label, i), start)
+			}
+			idx += uint64(diff)
+			if idx >= uint64(f.Header.MethodIDsSize) {
 				return nil, perr("class_data_item", start, fmt.Errorf("%w: method_idx %d out of range", ErrInvalid, idx))
 			}
 			if codeOff != 0 && uint64(codeOff)+16 > uint64(len(f.data)) {
 				return nil, perr("class_data_item", start, fmt.Errorf("%w: code_off 0x%x", ErrOutOfBounds, codeOff))
 			}
-			out = append(out, EncodedMethod{MethodIdx: idx, AccessFlags: flags, CodeOff: codeOff, Range: Range{start, c.Pos() - start}})
+			out = append(out, EncodedMethod{MethodIdx: uint32(idx), AccessFlags: flags, CodeOff: codeOff, Range: Range{start, c.Pos() - start}})
 		}
 		return out, nil
 	}

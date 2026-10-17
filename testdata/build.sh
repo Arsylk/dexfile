@@ -18,8 +18,10 @@ JAVA="$HERE/java"
 BUILD="$HERE/build"
 DEX="$HERE/dex"
 GEN="$HERE/../scripts/gen_large.py"
+GEN_CONTAINER="$HERE/../scripts/gen_container.py"
+D8_JAR="$BT/lib/d8.jar"
 
-for tool in "$D8" "$DEXDUMP" "$ANDROID_JAR" "$GEN"; do
+for tool in "$D8" "$DEXDUMP" "$ANDROID_JAR" "$GEN" "$GEN_CONTAINER" "$D8_JAR"; do
   [[ -e "$tool" ]] || { echo "missing: $tool" >&2; exit 1; }
 done
 command -v "$JAVAC" >/dev/null || { echo "javac not found" >&2; exit 1; }
@@ -52,6 +54,8 @@ compile indy -- "$JAVA/indy"
 compile tiny -- "$JAVA/tiny"
 compile dex2 -- "$JAVA/dex2"
 compile dex1 -cp "$BUILD/classes-dex2" -- "$JAVA/dex1"
+"$PYTHON" "$GEN_CONTAINER" "$BUILD/container-src"
+compile container -- "$BUILD/container-src"
 
 # ---------------------------------------------------------------------------
 # 2. d8
@@ -64,6 +68,22 @@ run_d8() { # run_d8 <out.dex> <d8 flags...> -- <inputs...>
   rm -rf "$tmp"; mkdir -p "$tmp"
   echo "d8     [$(basename "$out")] ${flags[*]}"
   "$D8" --lib "$ANDROID_JAR" "${flags[@]}" --output "$tmp" "$@"
+  [[ -f "$tmp/classes.dex" ]] || { echo "d8 produced no classes.dex for $out" >&2; exit 1; }
+  if [[ -f "$tmp/classes2.dex" ]]; then echo "unexpected multidex output for $out" >&2; exit 1; fi
+  mv "$tmp/classes.dex" "$out"
+}
+
+# DEX 041 (container format). d8 only emits it when the container experiment
+# property is set, which the d8 wrapper script cannot pass, so run the jar.
+run_d8_container() { # run_d8_container <out.dex> <d8 flags...> -- <inputs...>
+  local out="$1"; shift
+  local flags=()
+  while [[ "$1" != "--" ]]; do flags+=("$1"); shift; done; shift
+  local tmp="$BUILD/d8-$(basename "$out" .dex)"
+  rm -rf "$tmp"; mkdir -p "$tmp"
+  echo "d8     [$(basename "$out")] (container) ${flags[*]}"
+  java -Dcom.android.tools.r8.dexContainerExperiment=true -cp "$D8_JAR" com.android.tools.r8.D8 \
+    --lib "$ANDROID_JAR" "${flags[@]}" --output "$tmp" "$@" 2> >(grep -v 'Forcing container DEX' >&2 || true)
   [[ -f "$tmp/classes.dex" ]] || { echo "d8 produced no classes.dex for $out" >&2; exit 1; }
   if [[ -f "$tmp/classes2.dex" ]]; then echo "unexpected multidex output for $out" >&2; exit 1; fi
   mv "$tmp/classes.dex" "$out"
@@ -84,6 +104,12 @@ run_d8 "$DEX/v038.dex"    --min-api 26 --debug --no-desugaring  -- "${ALL_CLASSE
 run_d8 "$DEX/v039.dex"    --min-api 28 --debug                  -- "${ALL_CLASSES[@]}"
 run_d8 "$DEX/release.dex" --min-api 21 --release                -- "${ALL_CLASSES[@]}"
 run_d8 "$DEX/tiny.dex"    --min-api 21 --debug                  -- "${TINY_CLASSES[@]}"
+
+# v041.dex: the main fixtures in container format (one section).
+# container041.dex: two sections, see scripts/gen_container.py.
+mapfile -t CONTAINER_CLASSES < <(classfiles "$BUILD/classes-container")
+run_d8_container "$DEX/v041.dex"         --min-api 35 --debug   -- "${ALL_CLASSES[@]}"
+run_d8_container "$DEX/container041.dex" --min-api 35 --release -- "${CONTAINER_CLASSES[@]}"
 
 # multidex.apk: classes.dex = main fixtures + Caller + Dup(v1); classes2.dex = Callee + Dup(v2)
 run_d8 "$BUILD/classes.dex"  --min-api 21 --debug --classpath "$BUILD/classes-dex2" -- "${MAIN_CLASSES[@]}" "${DEX1_CLASSES[@]}"
@@ -143,6 +169,11 @@ echo "python [malformed/]"
 # ---------------------------------------------------------------------------
 for f in "$DEX"/*.dex; do
   base="${f%.dex}"
+  if [[ "$(basename "$f")" == container041.dex ]]; then
+    # Header blocks only: the full listing of 66,600 abstract methods is 23 MB.
+    "$DEXDUMP" -f "$f" | awk '/^Class #/{skip=1} /^Opened /{skip=0} !skip' > "$base.dexdump-f.txt"
+    continue
+  fi
   "$DEXDUMP" -d "$f" > "$base.dexdump.txt"
   "$DEXDUMP" -f "$f" > "$base.dexdump-f.txt"
 done

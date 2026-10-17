@@ -4,7 +4,7 @@ Binary DEX fixtures for the parser/analysis tests, plus the Java sources and the
 script that build them. Everything under `dex/` is generated; rebuild with:
 
 ```sh
-./testdata/build.sh          # needs javac >= 11, python3, Android build-tools 37.0.0 (d8, dexdump)
+./testdata/build.sh          # needs javac >= 11, python3, Android build-tools 37.0.0 (d8, lib/d8.jar, dexdump)
 ```
 
 Environment overrides: `ANDROID_SDK_ROOT`, `BUILD_TOOLS`, `ANDROID_JAR`, `JAVAC`, `PYTHON`.
@@ -20,6 +20,7 @@ for the `--min-api 21/24` builds are expected (see caveats).
 | `java/main/fixtures/large/` | **Generated** by `scripts/gen_large.py` (do not edit): `Large.java` (~470 KB), `ManyMethods.java` |
 | `java/indy/fixtures/indy/` | invokedynamic / MethodHandle sources (`Lambdas`, `Concat`, `Handles`) |
 | `java/tiny/fixtures/tiny/Hello.java` | Single trivial class for `tiny.dex` |
+| `build/container-src/` | **Generated** by `scripts/gen_container.py` (not committed): 740 interfaces and `Main` for `container041.dex` |
 | `java/dex1/fixtures/multidex/` | `Caller` (calls across dex files) and `Dup` (body #1) for `classes.dex` |
 | `java/dex2/fixtures/multidex/` | `Callee` and `Dup` (body #2) for `classes2.dex` |
 | `build.sh` | Build script |
@@ -36,6 +37,8 @@ debug build carries line numbers, local variable names and `MethodParameters` an
 | `dex/v037.dex` | `dex\n037` | `--min-api 24 --debug` | main + indy | 285,280 B |
 | `dex/v038.dex` | `dex\n038` | `--min-api 26 --debug --no-desugaring` | main + indy | 282,324 B |
 | `dex/v039.dex` | `dex\n039` | `--min-api 28 --debug` | main + indy | 285,200 B |
+| `dex/v041.dex` | `dex\n041` | `--min-api 35 --debug`, container format (one section) | main + indy | 284,944 B |
+| `dex/container041.dex` | `dex\n041` | `--min-api 35 --release`, container format (two sections) | generated container sources | 1,402,688 B |
 | `dex/release.dex` | `dex\n035` | `--min-api 21 --release` (no debug info) | main + indy | 215,004 B |
 | `dex/tiny.dex` | `dex\n035` | `--min-api 21 --debug` | tiny | 1,072 B |
 | `dex/multidex.apk` | zip | `classes.dex`: `--min-api 21 --debug --classpath classes-dex2` (main + dex1); `classes2.dex`: `--min-api 21 --debug` (dex2) | | 278,319 B |
@@ -45,7 +48,8 @@ Every `--lib` is `platforms/android-36/android.jar`. All inputs are the same cla
 the d8 flags differ, so the `v035`/`v037`/`v038`/`v039`/`release` files are directly
 comparable for differential tests.
 
-Beside each DEX: `<name>.dexdump.txt` (`dexdump -d`) and `<name>.dexdump-f.txt` (`dexdump -f`).
+Beside each DEX: `<name>.dexdump.txt` (`dexdump -d`) and `<name>.dexdump-f.txt` (`dexdump -f`),
+except `container041.dex`, which only has the header blocks of `dexdump -f` (see below).
 For the APK the two members are dumped as `multidex.classes.dexdump*.txt` and
 `multidex.classes2.dexdump*.txt`.
 
@@ -57,6 +61,9 @@ For the APK the two members are dumped as `multidex.classes.dexdump*.txt` and
 | `v037.dex` | 1690 | 159 | 217 | 119 | 918 | 63 | 285280 |
 | `v038.dex` | 1660 | 148 | 227 | 113 | 888 | 49 | 282324 |
 | `v039.dex` | 1689 | 158 | 219 | 119 | 919 | 62 | 285200 |
+| `v041.dex` | 1689 | 158 | 219 | 119 | 919 | 62 | 284944 |
+| `container041.dex` section 0 `` | 1594 | 21 | 5 | 1 | 1176 | 13 | 27384 |
+| `container041.dex` section 1 `` | 1594 | 731 | 1 | 0 | 65520 | 728 | 1375304 |
 | `release.dex` | 1284 | 159 | 217 | 119 | 917 | 63 | 215004 |
 | `tiny.dex` | 19 | 8 | 3 | 1 | 4 | 1 | 1072 |
 | `multidex.apk!classes.dex` | 1582 | 133 | 185 | 109 | 842 | 48 | 276712 |
@@ -69,6 +76,22 @@ class_data, code, string_data, debug_info, annotation, encoded_array, annotation
 `release.dex` still has 398 `debug_info` items: `d8 --release` drops local-variable records
 (only ~250 parameter entries remain, vs ~11,400 in `v035.dex`) but keeps a reduced line-number
 table (641 `line=` positions vs 11,431), so stack traces stay meaningful.
+
+### DEX 041 containers
+
+`v041.dex` and `container041.dex` are built by running `lib/d8.jar` directly with
+`-Dcom.android.tools.r8.dexContainerExperiment=true`, the only way d8 emits the
+container format. `v041.dex` holds the main fixtures as a single section.
+`container041.dex` declares 740 interfaces with 90 abstract methods each
+(66,600 method_ids, more than one section can hold) plus one concrete class, so
+d8 writes two sections: header 0 with 13 classes and header 1 with the remaining
+728, both pointing at one shared string table. Every offset in a container is
+relative to the container start, which is what `Sections` and `ParseAt` rely on.
+Its committed oracle keeps only the two header blocks (the full listing of the
+abstract methods is 23 MB); `TestContainer041` checks the member counts
+structurally, and the complete `dexdump -d` differential can be run locally by
+pointing `DEXFILE_EXTRA_FIXTURES` at a directory holding the file with full
+`dexdump -d` and `dexdump -f` listings.
 
 ### multidex.apk
 

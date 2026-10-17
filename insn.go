@@ -33,7 +33,7 @@ func (p PayloadKind) String() string {
 // the format's operand letters; the meaning of each is given by Format.
 type Insn struct {
 	Off     uint32      // code unit offset within insns
-	Units   uint16      // width in code units
+	Units   uint32      // width in code units (payloads can exceed 65535 units)
 	Op      uint8       // opcode byte (0x00 for payloads)
 	Fmt     Format      // encoding format
 	Payload PayloadKind // non-zero for payload pseudo-instructions
@@ -48,7 +48,7 @@ type Insn struct {
 	// Payload contents (only for Payload != PayloadNone).
 	PackedFirstKey int32
 	SwitchKeys     []int32 // sparse: explicit keys; packed: nil (derive from first key)
-	SwitchTargets  []int32 // relative offsets (code units) from the switch instruction... see note
+	SwitchTargets  []int32 // relative offsets (code units) from the switch instruction
 	FillWidth      uint16
 	FillCount      uint32
 	FillData       []byte // raw element bytes (len = FillWidth*FillCount)
@@ -75,7 +75,7 @@ func (in *Insn) Name() string {
 // HasRef reports whether the instruction references a table entry.
 func (in *Insn) HasRef() bool { return in.Payload == PayloadNone && Opcodes[in.Op].Ref != RefNone }
 
-// RangeRegs returns the argument registers for both list and range invoke forms.
+// ArgRegs returns the argument registers for both list and range invoke forms.
 func (in *Insn) ArgRegs() []uint16 {
 	if in.Regs != nil {
 		return in.Regs
@@ -92,30 +92,105 @@ func (in *Insn) ArgRegs() []uint16 {
 	return nil
 }
 
+// insnShape classifies the instruction at code-unit offset off and computes
+// its width without decoding operands. It performs exactly the validation
+// that DecodeInsn applies to an instruction's boundaries, so SweepInsns and
+// DecodeInsn agree on every boundary and every error. For payloads, size is
+// the entry count (switches) or the element byte length (fill-array-data).
+//
+// A 0x00 opcode whose high byte is not a payload identifier is a plain nop
+// of one code unit, as the Android runtime computes it.
+func insnShape(insns []byte, off uint32) (b []byte, op uint8, kind PayloadKind, units uint32, size uint64, err error) {
+	pos := int(off) * 2
+	if pos < 0 || pos+2 > len(insns) {
+		return nil, 0, PayloadNone, 0, 0, fmt.Errorf("instruction offset 0x%x out of bounds", off)
+	}
+	b = insns[pos:]
+	op = b[0]
+	if op == 0x00 && b[1] != 0 {
+		avail := uint64(len(b))
+		switch le16(b) {
+		case PayloadPackedSwitch:
+			if avail < 8 {
+				return nil, 0, PayloadNone, 0, 0, fmt.Errorf("packed-switch-payload at 0x%x truncated", off)
+			}
+			n := uint64(le16(b[2:]))
+			u := 4 + n*2
+			if u*2 > avail {
+				return nil, 0, PayloadNone, 0, 0, fmt.Errorf("packed-switch-payload at 0x%x: %d targets exceed code", off, n)
+			}
+			return b, 0, PayloadPacked, uint32(u), n, nil
+		case PayloadSparseSwitch:
+			if avail < 4 {
+				return nil, 0, PayloadNone, 0, 0, fmt.Errorf("sparse-switch-payload at 0x%x truncated", off)
+			}
+			n := uint64(le16(b[2:]))
+			u := 2 + n*4
+			if u*2 > avail {
+				return nil, 0, PayloadNone, 0, 0, fmt.Errorf("sparse-switch-payload at 0x%x: %d entries exceed code", off, n)
+			}
+			return b, 0, PayloadSparse, uint32(u), n, nil
+		case PayloadFillArrayData:
+			if avail < 8 {
+				return nil, 0, PayloadNone, 0, 0, fmt.Errorf("fill-array-data-payload at 0x%x truncated", off)
+			}
+			dataLen := uint64(le16(b[2:])) * uint64(le32(b[4:]))
+			u := 4 + (dataLen+1)/2
+			if u*2 > avail {
+				return nil, 0, PayloadNone, 0, 0, fmt.Errorf("fill-array-data-payload at 0x%x: %d bytes exceed code", off, dataLen)
+			}
+			return b, 0, PayloadFill, uint32(u), dataLen, nil
+		}
+		// Any other high byte: a one-unit nop.
+	}
+	info := &Opcodes[op]
+	units = uint32(info.Format.Units())
+	if pos+int(units)*2 > len(insns) {
+		return nil, 0, PayloadNone, 0, 0, fmt.Errorf("instruction %s at 0x%x truncated (needs %d code units)", info.Name, off, units)
+	}
+	if (info.Format == Fmt35c || info.Format == Fmt45cc) && b[1]>>4 > 5 {
+		return nil, 0, PayloadNone, 0, 0, fmt.Errorf("%s at 0x%x: invalid register count %d", info.Name, off, b[1]>>4)
+	}
+	return b, op, PayloadNone, units, 0, nil
+}
+
 // DecodeInsn decodes the instruction at code-unit offset off within insns.
 // insns is the raw little-endian instruction array (byte length is even).
 // Payloads are recognised by their pseudo-opcode and decoded fully.
 func DecodeInsn(insns []byte, off uint32) (Insn, error) {
-	pos := int(off) * 2
-	if pos+2 > len(insns) || pos < 0 {
-		return Insn{}, fmt.Errorf("instruction offset 0x%x out of bounds", off)
+	b, op, kind, units, size, err := insnShape(insns, off)
+	if err != nil {
+		return Insn{}, err
 	}
-	b := insns[pos:]
-	op := b[0]
-	in := Insn{Off: off, Op: op}
-
-	if op == 0x00 && b[1] != 0 {
-		return decodePayload(insns, off)
+	in := Insn{Off: off, Units: units, Op: op, Payload: kind}
+	if kind != PayloadNone {
+		in.Fmt = Fmt10x
+		switch kind {
+		case PayloadPacked:
+			n := int(size)
+			in.PackedFirstKey = int32(le32(b[4:]))
+			in.SwitchTargets = make([]int32, n)
+			for i := 0; i < n; i++ {
+				in.SwitchTargets[i] = int32(le32(b[8+i*4:]))
+			}
+		case PayloadSparse:
+			n := int(size)
+			in.SwitchKeys = make([]int32, n)
+			in.SwitchTargets = make([]int32, n)
+			for i := 0; i < n; i++ {
+				in.SwitchKeys[i] = int32(le32(b[4+i*4:]))
+				in.SwitchTargets[i] = int32(le32(b[4+n*4+i*4:]))
+			}
+		case PayloadFill:
+			in.FillWidth = le16(b[2:])
+			in.FillCount = le32(b[4:])
+			in.FillData = b[8 : 8+size]
+		}
+		return in, nil
 	}
 
 	info := &Opcodes[op]
 	in.Fmt = info.Format
-	units := int(info.Format.Units())
-	if pos+units*2 > len(insns) {
-		return Insn{}, fmt.Errorf("instruction %s at 0x%x truncated (needs %d code units)", info.Name, off, units)
-	}
-	in.Units = uint16(units)
-
 	switch info.Format {
 	case Fmt10x, FmtUnused:
 		// nothing
@@ -186,21 +261,17 @@ func DecodeInsn(insns []byte, off uint32) (Insn, error) {
 		in.A = uint32(b[1])
 		in.Idx = le32(b[2:])
 	case Fmt35c, Fmt45cc:
-		// A|G op BBBB F|E|D|C [HHHH]
+		// A|G|op BBBB F|E|D|C [HHHH]; insnShape has validated A <= 5.
 		count := uint32(b[1] >> 4)
-		g := uint16(b[1] & 0x0f)
 		in.A = count
 		in.Idx = uint32(le16(b[2:]))
-		regs := []uint16{uint16(b[4] & 0x0f), uint16(b[4] >> 4), uint16(b[5] & 0x0f), uint16(b[5] >> 4), g}
-		if count > 5 {
-			return Insn{}, fmt.Errorf("%s at 0x%x: invalid register count %d", info.Name, off, count)
-		}
+		regs := []uint16{uint16(b[4] & 0x0f), uint16(b[4] >> 4), uint16(b[5] & 0x0f), uint16(b[5] >> 4), uint16(b[1] & 0x0f)}
 		in.Regs = regs[:count]
 		if info.Format == Fmt45cc {
 			in.Idx2 = uint32(le16(b[6:]))
 		}
 	case Fmt3rc, Fmt4rcc:
-		// AA op BBBB CCCC [HHHH]
+		// AA|op BBBB CCCC [HHHH]
 		in.A = uint32(b[1])
 		in.Idx = uint32(le16(b[2:]))
 		in.C = uint32(le16(b[4:]))
@@ -216,73 +287,11 @@ func DecodeInsn(insns []byte, off uint32) (Insn, error) {
 	return in, nil
 }
 
-func decodePayload(insns []byte, off uint32) (Insn, error) {
-	pos := int(off) * 2
-	b := insns[pos:]
-	ident := le16(b)
-	in := Insn{Off: off, Op: 0, Fmt: Fmt10x}
-	avail := len(b)
-	switch ident {
-	case PayloadPackedSwitch:
-		if avail < 8 {
-			return Insn{}, fmt.Errorf("packed-switch-payload at 0x%x truncated", off)
-		}
-		size := int(le16(b[2:]))
-		units := 4 + size*2
-		if units*2 > avail {
-			return Insn{}, fmt.Errorf("packed-switch-payload at 0x%x: %d targets exceed code", off, size)
-		}
-		in.Payload = PayloadPacked
-		in.Units = uint16(units)
-		in.PackedFirstKey = int32(le32(b[4:]))
-		in.SwitchTargets = make([]int32, size)
-		for i := 0; i < size; i++ {
-			in.SwitchTargets[i] = int32(le32(b[8+i*4:]))
-		}
-	case PayloadSparseSwitch:
-		if avail < 4 {
-			return Insn{}, fmt.Errorf("sparse-switch-payload at 0x%x truncated", off)
-		}
-		size := int(le16(b[2:]))
-		units := 2 + size*4
-		if units*2 > avail {
-			return Insn{}, fmt.Errorf("sparse-switch-payload at 0x%x: %d entries exceed code", off, size)
-		}
-		in.Payload = PayloadSparse
-		in.Units = uint16(units)
-		in.SwitchKeys = make([]int32, size)
-		in.SwitchTargets = make([]int32, size)
-		for i := 0; i < size; i++ {
-			in.SwitchKeys[i] = int32(le32(b[4+i*4:]))
-			in.SwitchTargets[i] = int32(le32(b[4+size*4+i*4:]))
-		}
-	case PayloadFillArrayData:
-		if avail < 8 {
-			return Insn{}, fmt.Errorf("fill-array-data-payload at 0x%x truncated", off)
-		}
-		width := le16(b[2:])
-		count := le32(b[4:])
-		dataLen := uint64(width) * uint64(count)
-		units := 4 + (dataLen+1)/2
-		if units*2 > uint64(avail) || units > 0xffff {
-			return Insn{}, fmt.Errorf("fill-array-data-payload at 0x%x: %d bytes exceed code", off, dataLen)
-		}
-		in.Payload = PayloadFill
-		in.Units = uint16(units)
-		in.FillWidth = width
-		in.FillCount = count
-		in.FillData = b[8 : 8+dataLen]
-	default:
-		return Insn{}, fmt.Errorf("unknown payload ident 0x%04x at 0x%x", ident, off)
-	}
-	return in, nil
-}
-
 // InsnRec is the compact per-instruction record kept for a decoded method:
 // enough to locate and classify every instruction without retaining operands.
 type InsnRec struct {
 	Off     uint32
-	Units   uint16
+	Units   uint32
 	Op      uint8
 	Payload PayloadKind
 }
@@ -290,18 +299,19 @@ type InsnRec struct {
 // SweepInsns performs a linear sweep over the instruction array, returning
 // one record per instruction or payload. Decoding stops at the first
 // undecodable position; the returned error describes it while the records
-// decoded so far are still returned.
+// decoded so far are still returned. Only instruction boundaries are
+// computed; operands are not decoded.
 func SweepInsns(insns []byte) ([]InsnRec, error) {
 	n := uint32(len(insns) / 2)
 	recs := make([]InsnRec, 0, n/2+1)
 	var off uint32
 	for off < n {
-		in, err := DecodeInsn(insns, off)
+		_, op, kind, units, _, err := insnShape(insns, off)
 		if err != nil {
 			return recs, err
 		}
-		recs = append(recs, InsnRec{Off: off, Units: in.Units, Op: in.Op, Payload: in.Payload})
-		off += uint32(in.Units)
+		recs = append(recs, InsnRec{Off: off, Units: units, Op: op, Payload: kind})
+		off += units
 	}
 	return recs, nil
 }
@@ -315,7 +325,7 @@ func FindInsn(recs []InsnRec, off uint32) int {
 		r := recs[mid]
 		if off < r.Off {
 			hi = mid
-		} else if off >= r.Off+uint32(r.Units) {
+		} else if off >= r.Off+r.Units {
 			lo = mid + 1
 		} else {
 			return mid
