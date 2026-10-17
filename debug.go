@@ -157,9 +157,6 @@ func (f *File) parseDebugInfo(off uint32, insnsSize uint32, rec *[]FieldView, se
 	line := int32(di.LineStart)
 	srcFile := int32(-1)
 	prologueEnd, epilogueBegin := false, false
-	type openLocal struct {
-		idx int
-	}
 	live := map[uint32]int{} // register -> index in di.Locals of the open local
 	if seed != nil {
 		reg := seed.firstReg

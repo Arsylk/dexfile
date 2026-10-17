@@ -1,5 +1,8 @@
 # dexfile
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/arsylk/dexfile.svg)](https://pkg.go.dev/github.com/arsylk/dexfile)
+[![CI](https://github.com/Arsylk/dexfile/actions/workflows/ci.yml/badge.svg)](https://github.com/Arsylk/dexfile/actions/workflows/ci.yml)
+
 A bounds-safe, byte-range-aware parser and instruction decoder for Android
 DEX files, written in pure Go with no dependencies outside the standard
 library. It is the parser behind [dex-mcp](https://github.com/Arsylk/dex-mcp)
@@ -151,3 +154,7 @@ against, so the build script is only needed to change them.
 No decompilation, no APK modification, no execution of analysed code, no
 ODEX/VDEX/CDEX parsing. Cross-reference indexes, control-flow graphs and
 data-flow live in [dex-mcp](https://github.com/Arsylk/dex-mcp).
+
+## License
+
+MIT, see [LICENSE](LICENSE).

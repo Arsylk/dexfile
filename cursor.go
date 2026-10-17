@@ -264,17 +264,6 @@ func (c *cursor) ulebp1(name string) int32 {
 	return r
 }
 
-// align4 skips to the next 4-byte boundary (used after insns before tries).
-func (c *cursor) align4() {
-	if c.err != nil {
-		return
-	}
-	if c.pos%4 != 0 {
-		pad := 4 - c.pos%4
-		c.skip(pad)
-	}
-}
-
 // checkRange validates that [off, off+n) lies within the data.
 func checkRange(data []byte, off uint32, n uint64, what string) error {
 	if uint64(off)+n > uint64(len(data)) {
